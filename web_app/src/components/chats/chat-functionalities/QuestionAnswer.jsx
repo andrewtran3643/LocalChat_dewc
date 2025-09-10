@@ -59,15 +59,15 @@ function QuestionAnswer() {
 
   // load model upon `modelName` or `processor` signal
   createEffect(async () => {
-    if (modelName() == "") return;
+    if (modelName() === "") return;
 
     document.getElementById("folderInput").disabled = true;
     document.getElementById("sendButton").disabled = true;
     
-    // Change model button text to indicate a change in the procedure,
-    // and request an animation frame to show this change.
     setAddModelBtnText("Creating pipeline");
-    await new Promise(requestAnimationFrame);
+
+    // let Solid flush reactivity and let the browser repaint
+    await new Promise(resolve => setTimeout(resolve, 0));
 
     // configure transformer js environment
     env.useBrowserCache = true;
@@ -81,11 +81,11 @@ function QuestionAnswer() {
       qaPipeline = null;
       setModelName('');
       alert(`Failed to load model. Please try again, if issues persist try reloading page.`);
-    } finally {
-      setAddModelBtnText("Add Model");
-      document.getElementById("folderInput").disabled = false;
-      document.getElementById("sendButton").disabled = false;
     }
+
+    setAddModelBtnText("Add Model");
+    document.getElementById("folderInput").disabled = false;
+    document.getElementById("sendButton").disabled = false;
   });
  
   const processQuestion = async () => {

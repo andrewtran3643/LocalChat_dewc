@@ -15,6 +15,12 @@
   padding-right: 2vh;
 }
 
+.disabledSendButton, .disabledSendButton:hover {
+  border: 1px solid black !important;
+  background-color: var(--selected-button-colour) !important;
+  cursor: auto !important;
+}
+
 .tab.highlighted, .selectedTab.highlighted {
   background-color: var(--background-tertiary) !important;
   transform: translateX(2px);

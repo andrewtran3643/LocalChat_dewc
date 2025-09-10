@@ -1,17 +1,17 @@
 import { useContext, createSignal, onMount, createEffect } from 'solid-js';
-import { pipeline, env, SummarizationPipeline } from '@huggingface/transformers';
 
 import { ChatContext } from '../ChatContext';
 import styles from './Summarize.module.css';
 import { parseDocxFileAsync, parseHTMLFileAsync, parseTxtFileAsync, parsePdfFileAsync } from '../../../utils/FileReaders';
 import { getCachedModelsNames, cacheModel } from '../../../utils/ModelCache';
 
+// import workerCode from './summarize_worker.js?raw';
+
 
 function Summarize() {
 
   const chatContext = useContext(ChatContext);
 
-  let summarizer;
   const [modelName, setModelName] = createSignal("");
   const [availableModels, setAvailableModels] = createSignal([], {equals: false}); 
 
@@ -20,17 +20,65 @@ function Summarize() {
 
   const [addModelBtnText, setAddModelBtnText] = createSignal("Add Model");
 
+  const [sendDisabled, setSendDisabled] = createSignal(true);
+
+  let worker;
+
   // Checks the cache for models that can be used for summarization.
   onMount(async () => {
     setAvailableModels(await getCachedModelsNames('summarization'));
   });
 
+  // setup summarize worker upon `modelName` or `processor` signal
+  createEffect(() => {
+    if (modelName() === "") return;
+
+    if (worker) worker.terminate();
+    worker = undefined;
+
+    // const blob = new Blob([workerCode], { type: 'application/javascript' }); // cannot use imports within the worker this way
+    // worker = new Worker(URL.createObjectURL(blob));
+
+    // web worker via file path or URL doesn't work as it gets bundled into a separate js file
+    worker = new Worker(new URL('./summarize_worker.js', import.meta.url), { type: 'module' });
+
+    worker.onmessage = (e) => {
+      switch (e.data.task) {
+
+        case 'loadModel':
+          if (e.data.response === 'success') {
+            console.log('Successfully loaded pipeline.');
+            setSendDisabled(false);
+          }
+          if (e.data.response === 'failed') {
+            console.log('Failed to load summarization model.');
+            setModelName('');
+            alert('Failed to load model. Please try again, if issues persist try reloading page.');
+          }
+          setAddModelBtnText("Add Model");
+          break;
+
+        case 'inference':
+          if (e.data.response === 'failed') {
+            chatContext.addMessage('Error: failed to summarise text. Please try again.', false);
+          } else {
+            chatContext.addMessage(e.data.response);
+          }
+          setSendDisabled(false);
+          break;
+      }
+    };
+
+    setSendDisabled(true);
+    setAddModelBtnText("Loading Model");
+    worker.postMessage({task: 'loadModel', model: modelName(), device: chatContext.processor()});
+  });
+
   const addModel = async () => {
 
     document.getElementById("folderInput").disabled = true;
-    document.getElementById("sendButton").disabled = true;
 
-    setAddModelBtnText("Caching Model");
+    setAddModelBtnText("Loading Model");
 
     let folderElement = document.getElementById("folderInput");
     let files = [...folderElement.files];
@@ -56,45 +104,16 @@ function Summarize() {
     }
     
     document.getElementById("folderInput").disabled = false;
-    document.getElementById("sendButton").disabled = false;
-    setAddModelBtnText("Add Model");
   };
-
-  // load model upon `modelName` or `processor` signal
-  createEffect(async () => {
-    if (modelName() == "") return;
-
-    document.getElementById("folderInput").disabled = true;
-    document.getElementById("sendButton").disabled = true;
-    
-    // Change model button text to indicate a change in the procedure,
-    // and request an animation frame to show this change.
-    setAddModelBtnText("Creating pipeline");
-    await new Promise(requestAnimationFrame);
-
-    // configure transformer js environment
-    env.useBrowserCache = true;
-    env.allowRemoteModels = true;
-
-    summarizer = await pipeline('summarization', modelName(), { device: chatContext.processor() });
-    console.log("Finished model setup using", chatContext.processor());
-
-    setAddModelBtnText("Add Model");
-    document.getElementById("folderInput").disabled = false;
-    document.getElementById("sendButton").disabled = false;
-  });
 
   const summarizeTextInput = async () => {
 
-    if (modelName() == "") {
+    if (modelName() == "" || !worker) {
       alert("A model must be selected before summarising text. Please select a model.");
       return;
     }
-    // TODO improve UX around model loading, promise handling, and error handling
-    if (!(summarizer instanceof SummarizationPipeline)) {
-      alert("Model is loading... please try again.");
-      return;
-    }
+
+    setSendDisabled(true);
 
     let inputTextArea = document.getElementById("inputTextArea");
     let userMessage = inputTextArea.value;
@@ -104,31 +123,19 @@ function Summarize() {
     chatContext.addMessage("Summarise: " + userMessage, true);
     inputTextArea.value = "";
 
-    let messageDate = chatContext.addMessage("Generating Message", false, modelName());  // temporary message to indicate progress
-    await new Promise(resolve => setTimeout(resolve, 0));  // force a re-render by yielding control back to browser
-
-    try {
-      let output = await summarizer(userMessage, { max_new_tokens: 100});  // generate response
-      chatContext.updateMessage(messageDate, output[0].summary_text);  // update temp message 
-    } catch (e) {
-      chatContext.updateMessage(messageDate, "Error: failed to summarise text. Please try again.");  
-    }
+    worker.postMessage({task: 'inference', text: userMessage});
   };
 
   const summarizeFileInput = async () => {
 
-    if (modelName() == "") {
+    if (modelName() == "" || !worker) {
       alert("A model must be selected before summarising text. Please select a model.");
       return;
     }
-    // TODO improve UX around model loading, promise handling, and error handling
-    if (!(summarizer instanceof SummarizationPipeline)) {
-      alert("Model is loading... please try again.");
-      return;
-    }
+
+    setSendDisabled(true);
 
     let fileInput = document.getElementById("fileInput");
-
     let file = fileInput.files[0];
 
     let fileContent = "";
@@ -148,7 +155,7 @@ function Summarize() {
       }
     } catch (error) {
       console.error("Error parsing file:", error);
-      alert("Error processing file. Please try a different file format.");
+      alert("Error processing file.");
       fileInput.value = null;
       return;
     }
@@ -156,15 +163,7 @@ function Summarize() {
     chatContext.addMessage("Summarise File: " + file.name, true);
     chatContext.addFile(fileContent, file.name);
 
-    let messageDate = chatContext.addMessage("Generating Message", false, modelName());  // temporary message to indicate progress
-    await new Promise(resolve => setTimeout(resolve, 0));  // forces a re-render again by yielding control back to the browser
-    
-    try {
-      let output = await summarizer(fileContent, { max_new_tokens: 100}); 
-      chatContext.updateMessage(messageDate, output[0].summary_text);  // update temp message
-    } catch (e) {
-      chatContext.updateMessage(messageDate, "Error: failed to summarise text. Please try again.");
-    }
+    worker.postMessage({task: 'inference', text: fileContent});
 
     fileInput.value = null;  // clear file input element
   };
@@ -241,8 +240,9 @@ function Summarize() {
             <input type="file" id="folderInput" class="hidden" webkitdirectory multiple onChange={addModel} />
             <button 
               id="sendButton" 
-              class={styles.sendButton}
+              class={`${styles.sendButton} ${sendDisabled() ? styles.disabledSendButton : ""}`}
               onClick={() => {tab() == "text" ? summarizeTextInput() : summarizeFileInput()}} 
+              disabled={sendDisabled()}
             >
               Send
             </button>
